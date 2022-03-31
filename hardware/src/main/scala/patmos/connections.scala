@@ -314,7 +314,7 @@ class FetchIO(writable:Boolean) extends Bundle() {
   // connections to instruction cache
   val feicache = new FeICache().asOutput
   val icachefe = new ICacheFe().asInput
-  val write = if (!writable) None else Some(new Write)
+  val write = if (!writable) None else Some(new Write().asInput)
 }
 
 class ExcDec() extends Bundle() {
