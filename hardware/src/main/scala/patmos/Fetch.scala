@@ -18,9 +18,8 @@ import util.Utility
 import util.BlackBoxRom
 import util.BlackBoxRomIO
 
-class Fetch(init : Either[Int, String]) extends Module {
-  // If the memory is specified via a int, it is writable.
-  val io = IO(new FetchIO(init.isLeft))
+class Fetch(binFile : String, writable : Boolean) extends Module {
+  val io = IO(new FetchIO(false))
 
   val pcReg = RegInit(UInt(1, PC_SIZE))
   val pcNext = dontTouch(Wire(UInt(PC_SIZE.W))) // for emulator
@@ -29,52 +28,67 @@ class Fetch(init : Either[Int, String]) extends Module {
   val addrEvenReg = Reg(init = UInt(2, PC_SIZE), next = addrEven)
   val addrOddReg = Reg(init = UInt(1, PC_SIZE), next = addrOdd)
 
-  val (mem_io, romAddrUInt) = init match{
-    case Right(binary) => {
-      // Instantiate dual issue ROM
-      val romContents = Utility.binToDualRom(binary, INSTR_WIDTH)
-      val romAddrUInt = log2Up(romContents._1.length)
+  val romContents = Utility.binToDualRom(binary, INSTR_WIDTH)
+  val amount = romContents._1.length
+  val romAddrUInt = log2Up(amount)
+  val rom = Module(new BlackBoxRom(romContents, romAddrUInt))
 
-      val rom = Module(new BlackBoxRom(romContents, romAddrUInt))
-
-      (rom.io, romAddrUInt)
+  val mem_io = if !writable {
+    when(io.ena && !reset) {
+      addrEven := Cat((pc_inc)(PC_SIZE - 1, 1), UInt(0)).asUInt
+      addrOdd := Cat((pc_next)(PC_SIZE - 1, 1), UInt(1)).asUInt
+      pcReg := pcNext //is pc_next - needed for emulator
     }
 
-    case Left(amount) => {
-      val write = io.write.get
+    rom.io
+  } else {
+      val internal = Wire(new Write)
+      internal.writeEven := rom.dataEven
+      internal.addrEven := RegNext(counter)
+
+      internal.writeOdd := rom.dataOdd
+      internal.addrOdd := RegNext(counter)
+
+      val write = io.write.getOrElse(_ => internal)
+
+      val counter = RegInit(0.U(log2Up(amount)))
+
+      when(io.ena && !reset ) {
+        when(counter < amount.U){
+          counter := 4.U + counter        
+          internal.enEven := true.B
+          internal.enOdd := true.B
+        }.otherwise{
+          addrEven := Cat((pc_inc)(PC_SIZE - 1, 1), UInt(0)).asUInt
+          addrOdd := Cat((pc_next)(PC_SIZE - 1, 1), UInt(1)).asUInt
+          pcReg := pcNext //is pc_next - needed for emulator
+        }
+      }
       
       val promEven = MemBlock(amount / 2, INSTR_WIDTH)
-      promEven.io.wrEna := write.en & !write.addr(0)
-      promEven.io.wrAddr := write.addr >> 1
-      promEven.io.wrData := write.data
+      promEven.io.wrEna := write.enEven
+      promEven.io.wrAddr := write.addrEven
+      promEven.io.wrData := write.dataEven
 
       val promOdd = MemBlock(amount / 2, INSTR_WIDTH)
-      promOdd.io.wrEna := write.en & write.addr(0)
-      promOdd.io.wrAddr := write.addr >> 1
-      promOdd.io.wrData := write.data
+      promOdd.io.wrEna := write.enOdd
+      promOdd.io.wrAddr := write.addrOdd
+      promOdd.io.wrData := write.dataOdd
 
-      val romAddrUInt = log2Up(amount)
       val mem_io = new BlackBoxRomIO(romAddrUInt)
-      mem_io.addressEven := promEven.io.rdAddr
-      mem_io.addressOdd := promOdd.io.rdAddr
+      promEven.io.rdAddr := mem_io.addressEven
+      promOdd.io.rdAddr := mem_io.addressOdd
       mem_io.instructionEven := promEven.io.rdData
       mem_io.instructionOdd := promOdd.io.rdData
 
-      (mem_io, romAddrUInt)
-    }
-     
-  }
-  
-  
-
+      mem_io
+  } 
   
   val instr_a_ispm = Wire(UInt())
   val instr_b_ispm = Wire(UInt())
   instr_a_ispm := UInt(0)
   instr_b_ispm := UInt(0)
   
-  
-
   if (ISPM_SIZE > 0) {
     val ispmAddrUInt = log2Up(ISPM_SIZE / 4 / 2)
     val memEven = MemBlock(ISPM_SIZE / 4 / 2, INSTR_WIDTH, bypass = false)
@@ -171,12 +185,7 @@ class Fetch(init : Either[Int, String]) extends Module {
   val pc_inc = Mux(pc_next(0), pc_next2, pc_next)
   addrEven := addrEvenReg
   addrOdd := addrOddReg
-  when(io.ena && !reset) {
-    addrEven := Cat((pc_inc)(PC_SIZE - 1, 1), UInt(0)).asUInt
-    addrOdd := Cat((pc_next)(PC_SIZE - 1, 1), UInt(1)).asUInt
-    pcReg := pcNext //is pc_next - needed for emulator
-  }
-
+  
   val relPc = pcReg - relBaseReg
 
   io.fedec.pc := pcReg
